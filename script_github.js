@@ -603,56 +603,8 @@
       const pfRect = playfield.getBoundingClientRect();
       if (pfRect.width < 2 || pfRect.height < 2) return;
 
-      // Crop export to the actual composed scene (tree + toys + lights), with a small padding.
-      // This avoids saving a lot of empty space below/around the tree.
-      const pad = 14;
-      const tRect = treeImg.getBoundingClientRect();
-      let minX = tRect.left - pfRect.left;
-      let minY = tRect.top - pfRect.top;
-      let maxX = tRect.right - pfRect.left;
-      let maxY = tRect.bottom - pfRect.top;
-
-      for (const toy of toyElements) {
-        const r = toy.getBoundingClientRect();
-        minX = Math.min(minX, r.left - pfRect.left);
-        minY = Math.min(minY, r.top - pfRect.top);
-        maxX = Math.max(maxX, r.right - pfRect.left);
-        maxY = Math.max(maxY, r.bottom - pfRect.top);
-      }
-
-      if (lightsOn) {
-        const lights = treeZone.querySelectorAll('.light');
-        for (const l of lights) {
-          const r = l.getBoundingClientRect();
-          // include glow radius
-          const rad = Math.max(r.width, r.height) * 1.8;
-          const cx = (r.left - pfRect.left) + r.width / 2;
-          const cy = (r.top - pfRect.top) + r.height / 2;
-          minX = Math.min(minX, cx - rad);
-          minY = Math.min(minY, cy - rad);
-          maxX = Math.max(maxX, cx + rad);
-          maxY = Math.max(maxY, cy + rad);
-        }
-      }
-
-      minX = clamp(minX - pad, 0, pfRect.width);
-      minY = clamp(minY - pad, 0, pfRect.height);
-      maxX = clamp(maxX + pad, 0, pfRect.width);
-      maxY = clamp(maxY + pad, 0, pfRect.height);
-
-      const outW = Math.max(2, Math.round(maxX - minX));
-      const outH = Math.max(2, Math.round(maxY - minY));
-
       // Slightly higher cap for crisper exports on modern screens
       const dpr = Math.max(1, Math.min(4, window.devicePixelRatio || 1));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.round(outW * dpr);
-      canvas.height = Math.round(outH * dpr);
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      ctx.scale(dpr, dpr);
 
       // Helper: ensure images are decoded (prevents blank exports on some browsers)
       async function ensureDecoded(img) {
@@ -671,8 +623,6 @@
           try { await img.decode(); } catch (_) {}
         }
       }
-
-
 
       // ===== Background for export (so the saved PNG matches the prepared card) =====
       // 1) Try a dedicated template background (recommended): card-bg.png
@@ -698,108 +648,183 @@
         return null;
       }
 
-      function drawCoverImage(ctx2, img, w, h) {
-        // Mimic CSS background-size: cover (centered)
-        const iw = img.naturalWidth || img.width;
-        const ih = img.naturalHeight || img.height;
-        if (!iw || !ih) return;
-
-        const scale = Math.max(w / iw, h / ih);
-        const sw = iw * scale;
-        const sh = ih * scale;
-        const sx = (w - sw) / 2;
-        const sy = (h - sh) / 2;
-        ctx2.drawImage(img, sx, sy, sw, sh);
-      }
-
       const bgUrl = await getExportBackgroundURL();
+      let bgImg = null;
+
       if (bgUrl) {
-        const bgImg = new Image();
+        bgImg = new Image();
         // If you ever host assets on another domain, this helps avoid a tainted canvas.
         bgImg.crossOrigin = 'anonymous';
         bgImg.src = bgUrl;
         await ensureDecoded(bgImg);
-        // Fill whole export canvas with the background
-        drawCoverImage(ctx, bgImg, outW, outH);
+        if (!(bgImg.naturalWidth > 0 && bgImg.naturalHeight > 0)) bgImg = null;
+      }
+
+      // Template mode:
+      // If you provide a postcard template image (card-bg.png) that already contains the logo/text/border,
+      // we export the FULL template so nothing gets cropped.
+      const isTemplate = !!(bgImg && /(^|\/)card-bg\.png(\?|#|$)/i.test(bgUrl || ''));
+
+      // Compute output size:
+      // - Template: use template image aspect (fit to ~1080px on the longest side for reasonable file size)
+      // - Non-template: keep the old "smart crop" around the scene
+      let minX = 0, minY = 0, outW = 0, outH = 0;
+
+      const tRect = treeImg.getBoundingClientRect();
+
+      if (isTemplate) {
+        const iw = bgImg.naturalWidth;
+        const ih = bgImg.naturalHeight;
+
+        // Scale template down if it's very large (keeps files lightweight)
+        const maxSide = 1400; // safe quality/size balance
+        const scale = Math.min(1, maxSide / Math.max(iw, ih));
+
+        outW = Math.max(2, Math.round(iw * scale));
+        outH = Math.max(2, Math.round(ih * scale));
+
+        minX = 0;
+        minY = 0;
       } else {
-        // Final fallback: solid background (keeps export non-transparent)
+        // --- Old behavior: crop to the actual composed scene (tree + toys + lights), with padding ---
+        const pad = 14;
+
+        minX = tRect.left - pfRect.left;
+        minY = tRect.top - pfRect.top;
+        let maxX = tRect.right - pfRect.left;
+        let maxY = tRect.bottom - pfRect.top;
+
+        for (const toy of toyElements) {
+          const r = toy.getBoundingClientRect();
+          minX = Math.min(minX, r.left - pfRect.left);
+          minY = Math.min(minY, r.top - pfRect.top);
+          maxX = Math.max(maxX, r.right - pfRect.left);
+          maxY = Math.max(maxY, r.bottom - pfRect.top);
+        }
+
+        if (lightsOn) {
+          const lights = treeZone.querySelectorAll('.light');
+          for (const l of lights) {
+            const r = l.getBoundingClientRect();
+            const rad = Math.max(r.width, r.height) * 2.0; // include stronger glow
+            const cx = (r.left - pfRect.left) + r.width / 2;
+            const cy = (r.top - pfRect.top) + r.height / 2;
+            minX = Math.min(minX, cx - rad);
+            minY = Math.min(minY, cy - rad);
+            maxX = Math.max(maxX, cx + rad);
+            maxY = Math.max(maxY, cy + rad);
+          }
+        }
+
+        minX = clamp(minX - pad, 0, pfRect.width);
+        minY = clamp(minY - pad, 0, pfRect.height);
+        maxX = clamp(maxX + pad, 0, pfRect.width);
+        maxY = clamp(maxY + pad, 0, pfRect.height);
+
+        outW = Math.max(2, Math.round(maxX - minX));
+        outH = Math.max(2, Math.round(maxY - minY));
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(outW * dpr);
+      canvas.height = Math.round(outH * dpr);
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.scale(dpr, dpr);
+
+      // ----- Draw background -----
+      if (bgImg) {
+        // IMPORTANT: use "contain" to avoid cropping away the top (logo/text)
+        const iw = bgImg.naturalWidth, ih = bgImg.naturalHeight;
+        const scale = Math.min(outW / iw, outH / ih);
+        const dw = iw * scale;
+        const dh = ih * scale;
+        const dx = (outW - dw) / 2;
+        const dy = (outH - dh) / 2;
+
+        // Optional: fill behind in case of letterboxing
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, outW, outH);
+
+        ctx.drawImage(bgImg, dx, dy, dw, dh);
+      } else {
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, outW, outH);
       }
 
-      // Optional: subtle glow behind the tree when the garland is ON
-      if (lightsOn) {
-        ctx.save();
-        ctx.globalCompositeOperation = 'screen';
-        ctx.globalAlpha = 0.45;
-        const gx = outW * 0.5;
-        const gy = outH * 0.52;
-        const gr = Math.max(outW, outH) * 0.55;
-        const gg = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
-        gg.addColorStop(0, 'rgba(255,255,255,0.85)');
-        gg.addColorStop(0.35, 'rgba(255,220,170,0.35)');
-        gg.addColorStop(1, 'rgba(255,220,170,0)');
-        ctx.fillStyle = gg;
-        ctx.beginPath();
-        ctx.arc(gx, gy, gr, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
+      // Coordinate mapping:
+      // - Template: map playfield coordinates proportionally into the template canvas
+      // - Non-template: use the cropped coordinate system (old behavior)
+      const scaleX = isTemplate ? (outW / pfRect.width) : 1;
+      const scaleY = isTemplate ? (outH / pfRect.height) : 1;
+
+      function mapX(x) { return (isTemplate ? x * scaleX : x); }
+      function mapY(y) { return (isTemplate ? y * scaleY : y); }
+      function mapW(w) { return (isTemplate ? w * scaleX : w); }
+      function mapH(h) { return (isTemplate ? h * scaleY : h); }
 
       // Draw the tree
       await ensureDecoded(treeImg);
       ctx.drawImage(
         treeImg,
-        (tRect.left - pfRect.left) - minX,
-        (tRect.top - pfRect.top) - minY,
-        tRect.width,
-        tRect.height
+        mapX((tRect.left - pfRect.left) - minX),
+        mapY((tRect.top - pfRect.top) - minY),
+        mapW(tRect.width),
+        mapH(tRect.height)
       );
 
-      // Draw toys (as they are positioned in playfield)
+      // Draw toys
       const toys = Array.from(toyElements);
       for (const toy of toys) {
         await ensureDecoded(toy);
         const r = toy.getBoundingClientRect();
         const x = (r.left - pfRect.left) - minX;
         const y = (r.top - pfRect.top) - minY;
-        ctx.drawImage(toy, x, y, r.width, r.height);
+        ctx.drawImage(toy, mapX(x), mapY(y), mapW(r.width), mapH(r.height));
       }
 
-      // Draw lights (approximation of CSS glow)
+      // Draw lights (stronger than before)
       if (lightsOn) {
         const lights = treeZone.querySelectorAll('.light');
         for (const l of lights) {
           const r = l.getBoundingClientRect();
           const cx = ((r.left - pfRect.left) + r.width / 2) - minX;
           const cy = ((r.top - pfRect.top) + r.height / 2) - minY;
-          const rad = Math.max(r.width, r.height) * 1.8;
 
-          const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
-          g.addColorStop(0, 'rgba(255, 235, 170, 0.95)');
-          g.addColorStop(0.35, 'rgba(255, 160, 90, 0.55)');
+          const base = Math.max(r.width, r.height);
+          const rad = base * 2.4;
+
+          const mx = mapX(cx);
+          const my = mapY(cy);
+          const mrad = (isTemplate ? rad * ((scaleX + scaleY) / 2) : rad);
+
+          const g = ctx.createRadialGradient(mx, my, 0, mx, my, mrad);
+          g.addColorStop(0, 'rgba(255, 250, 210, 1)');
+          g.addColorStop(0.35, 'rgba(255, 190, 95, 0.70)');
           g.addColorStop(1, 'rgba(255, 160, 90, 0)');
 
           ctx.fillStyle = g;
           ctx.beginPath();
-          ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+          ctx.arc(mx, my, mrad, 0, Math.PI * 2);
           ctx.fill();
         }
 
-        // Light “magic” overlay on the saved image (subtle sparkles)
+        // Subtle sparkles overlay
         ctx.save();
         ctx.globalCompositeOperation = 'screen';
-        ctx.globalAlpha = 0.55;
+        ctx.globalAlpha = 0.60;
 
-        const r = (min, max) => Math.random() * (max - min) + min;
-        const sparkCount = 14;
+        const rnd = (min, max) => Math.random() * (max - min) + min;
+        const sparkCount = 18;
         for (let i = 0; i < sparkCount; i++) {
-          const sx = r(0, outW);
-          const sy = r(0, outH);
-          const sr = r(18, 44);
+          const sx = rnd(0, outW);
+          const sy = rnd(0, outH);
+          const sr = rnd(18, 52);
           const g2 = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
           g2.addColorStop(0, 'rgba(255,255,255,0.85)');
-          g2.addColorStop(0.35, 'rgba(255,235,190,0.40)');
+          g2.addColorStop(0.35, 'rgba(255,235,190,0.45)');
           g2.addColorStop(1, 'rgba(255,235,190,0)');
           ctx.fillStyle = g2;
           ctx.beginPath();
@@ -810,14 +835,11 @@
         ctx.restore();
       }
 
-      // Prefer Blob downloads (more reliable on iOS/Safari than large data URLs)
+      // Download
       const fileName = 'листівка.png';
       const blob = await new Promise((resolve) => {
-        try {
-          canvas.toBlob((b) => resolve(b), 'image/png');
-        } catch (_) {
-          resolve(null);
-        }
+        try { canvas.toBlob((b) => resolve(b), 'image/png'); }
+        catch (_) { resolve(null); }
       });
 
       if (blob) {
@@ -830,7 +852,6 @@
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 800);
       } else {
-        // Fallback (older browsers)
         const dataUrl = canvas.toDataURL('image/png');
         const a = document.createElement('a');
         a.href = dataUrl;
@@ -840,11 +861,10 @@
         a.remove();
       }
     } catch (e) {
-      // silent fail (no hard crash in the card)
+      // silent fail
     }
   }
-
-  saveBtn.addEventListener('click', () => {
+saveBtn.addEventListener('click', () => {
     playClick();
     exportPNG();
   });
